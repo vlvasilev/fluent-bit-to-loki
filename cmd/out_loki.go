@@ -11,6 +11,9 @@ import (
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/common/version"
 	"github.com/weaveworks/common/logging"
+
+	"github.com/fluent-bit-to-loki/pkg/config/config"
+	"github.com/fluent-bit-to-loki/pkg/lokiplugin/lokiplugin"
 )
 
 var (
@@ -42,7 +45,7 @@ func FLBPluginRegister(ctx unsafe.Pointer) int {
 // (fluentbit will call this)
 // ctx (context) pointer to fluentbit context (state/ c code)
 func FLBPluginInit(ctx unsafe.Pointer) int {
-	conf, err := parseConfig(&pluginConfig{ctx: ctx})
+	conf, err := config.ParseConfig(&pluginConfig{ctx: ctx})
 	if err != nil {
 		level.Error(logger).Log("[flb-go]", "failed to launch", "error", err)
 		return output.FLB_ERROR
@@ -71,7 +74,7 @@ func FLBPluginInit(ctx unsafe.Pointer) int {
 	level.Info(paramLogger).Log("DynamicHostSulfix", fmt.Sprintf("%+v", conf.dynamicHostSulfix))
 	level.Info(paramLogger).Log("DynamicHostRegex", fmt.Sprintf("%+v", conf.dynamicHostRegex))
 
-	plugin, err := newPlugin(conf, logger)
+	plugin, err := lokiplugin.NewPlugin(conf, logger)
 	if err != nil {
 		level.Error(logger).Log("newPlugin", err)
 		return output.FLB_ERROR

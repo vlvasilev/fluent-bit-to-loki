@@ -1,0 +1,193 @@
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/ioutil"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/cortexproject/cortex/pkg/util/flagext"
+	"github.com/prometheus/common/model"
+	"github.com/weaveworks/common/logging"
+
+	"github.com/grafana/loki/pkg/logql"
+	"github.com/grafana/loki/pkg/promtail/client"
+	lokiflag "github.com/grafana/loki/pkg/util/flagext"
+)
+
+var defaultClientCfg = client.Config{}
+
+func init() {
+	// Init everything with default values.
+	flagext.RegisterFlags(&defaultClientCfg)
+}
+
+type ConfigGetter interface {
+	Get(key string) string
+}
+
+type format int
+
+const (
+	jsonFormat format = iota
+	kvPairFormat
+)
+
+type Config struct {
+	clientConfig         client.Config
+	logLevel             logging.Level
+	autoKubernetesLabels bool
+	removeKeys           []string
+	labelKeys            []string
+	lineFormat           format
+	dropSingleKey        bool
+	labelMap             map[string]interface{}
+	labelSelector        map[string]string
+	dynamicHostPath      map[string]interface{}
+	dynamicHostPrefix    string
+	dynamicHostSulfix    string
+	dynamicHostRegex     string
+}
+
+func ParseConfig(cfg ConfigGetter) (*Config, error) {
+	res := &config{}
+
+	res.clientConfig = defaultClientCfg
+
+	url := cfg.Get("URL")
+	var clientURL flagext.URLValue
+	if url == "" {
+		url = "http://localhost:3100/loki/api/v1/push"
+	}
+	err := clientURL.Set(url)
+	if err != nil {
+		return nil, errors.New("failed to parse client URL")
+	}
+	res.clientConfig.URL = clientURL
+
+	// cfg.Get will return empty string if not set, which is handled by the client library as no tenant
+	res.clientConfig.TenantID = cfg.Get("TenantID")
+
+	batchWait := cfg.Get("BatchWait")
+	if batchWait != "" {
+		batchWaitValue, err := strconv.Atoi(batchWait)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse BatchWait: %s", batchWait)
+		}
+		res.clientConfig.BatchWait = time.Duration(batchWaitValue) * time.Second
+	}
+
+	batchSize := cfg.Get("BatchSize")
+	if batchSize != "" {
+		batchSizeValue, err := strconv.Atoi(batchSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse BatchSize: %s", batchSize)
+		}
+		res.clientConfig.BatchSize = batchSizeValue
+	}
+
+	labels := cfg.Get("Labels")
+	if labels == "" {
+		labels = `{job="fluent-bit"}`
+	}
+	matchers, err := logql.ParseMatchers(labels)
+	if err != nil {
+		return nil, err
+	}
+	labelSet := make(model.LabelSet)
+	for _, m := range matchers {
+		labelSet[model.LabelName(m.Name)] = model.LabelValue(m.Value)
+	}
+	res.clientConfig.ExternalLabels = lokiflag.LabelSet{LabelSet: labelSet}
+
+	logLevel := cfg.Get("LogLevel")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	var level logging.Level
+	if err := level.Set(logLevel); err != nil {
+		return nil, fmt.Errorf("invalid log level: %v", logLevel)
+	}
+	res.logLevel = level
+
+	autoKubernetesLabels := cfg.Get("AutoKubernetesLabels")
+	switch autoKubernetesLabels {
+	case "false", "":
+		res.autoKubernetesLabels = false
+	case "true":
+		res.autoKubernetesLabels = true
+	default:
+		return nil, fmt.Errorf("invalid boolean AutoKubernetesLabels: %v", autoKubernetesLabels)
+	}
+
+	removeKey := cfg.Get("RemoveKeys")
+	if removeKey != "" {
+		res.removeKeys = strings.Split(removeKey, ",")
+	}
+
+	labelKeys := cfg.Get("LabelKeys")
+	if labelKeys != "" {
+		res.labelKeys = strings.Split(labelKeys, ",")
+	}
+
+	dropSingleKey := cfg.Get("DropSingleKey")
+	switch dropSingleKey {
+	case "false":
+		res.dropSingleKey = false
+	case "true", "":
+		res.dropSingleKey = true
+	default:
+		return nil, fmt.Errorf("invalid boolean DropSingleKey: %v", dropSingleKey)
+	}
+
+	lineFormat := cfg.Get("LineFormat")
+	switch lineFormat {
+	case "json", "":
+		res.lineFormat = jsonFormat
+	case "key_value":
+		res.lineFormat = kvPairFormat
+	default:
+		return nil, fmt.Errorf("invalid format: %s", lineFormat)
+	}
+
+	labelMapPath := cfg.Get("LabelMapPath")
+	if labelMapPath != "" {
+		content, err := ioutil.ReadFile(labelMapPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open LabelMap file: %s", err)
+		}
+		if err := json.Unmarshal(content, &res.labelMap); err != nil {
+			return nil, fmt.Errorf("failed to Unmarshal LabelMap file: %s", err)
+		}
+		res.labelKeys = nil
+	}
+
+	labelSelector := cfg.Get("LabelSelector")
+	if labelSelector != "" {
+		labels := strings.Split(labelKeys, ",")
+		res.labelSelector = make(map[string]string)
+		for _, label := range labels {
+			splitLabel := strings.Split(label, ",")
+			if len(splitLabel) != 2 {
+				continue
+			}
+			res.labelSelector[splitLabel[0]] = splitLabel[1]
+		}
+	}
+
+	dynamicHostPath := cfg.Get("DynamicHostPath")
+	if dynamicHostPath != "" {
+		if err := json.Unmarshal([]byte(dynamicHostPath), &res.dynamicHostPath); err != nil {
+			return nil, fmt.Errorf("failed to Unmarshal DynamicHostPath json: %s", err)
+		}
+	}
+
+	res.dynamicHostPrefix = cfg.Get("DynamicHostPrefix")
+	res.dynamicHostSulfix = cfg.Get("DynamicHostSulfix")
+	res.dynamicHostRegex = cfg.Get("DynamicHostRegex")
+
+	return res, nil
+}

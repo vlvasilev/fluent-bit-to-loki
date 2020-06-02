@@ -17,7 +17,9 @@ require (
 	github.com/onsi/gomega v1.7.1
 	github.com/prometheus/common v0.9.1
 	github.com/weaveworks/common v0.0.0-20200429090833-ac38719f57dd
+	go.etcd.io/etcd v0.0.0-20191023171146-3cf2f69b5738
 	k8s.io/api v0.17.0
+	k8s.io/apimachinery v0.17.0
 	k8s.io/client-go v12.0.0+incompatible
 	k8s.io/code-generator v0.18.3
 )
