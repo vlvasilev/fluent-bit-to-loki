@@ -29,33 +29,33 @@ type ConfigGetter interface {
 	Get(key string) string
 }
 
-type format int
+type Format int
 
 const (
-	jsonFormat format = iota
-	kvPairFormat
+	JsonFormat Format = iota
+	KvPairFormat
 )
 
 type Config struct {
-	clientConfig         client.Config
-	logLevel             logging.Level
-	autoKubernetesLabels bool
-	removeKeys           []string
-	labelKeys            []string
-	lineFormat           format
-	dropSingleKey        bool
-	labelMap             map[string]interface{}
-	labelSelector        map[string]string
-	dynamicHostPath      map[string]interface{}
-	dynamicHostPrefix    string
-	dynamicHostSulfix    string
-	dynamicHostRegex     string
+	ClientConfig         client.Config
+	LogLevel             logging.Level
+	AutoKubernetesLabels bool
+	RemoveKeys           []string
+	LabelKeys            []string
+	LineFormat           Format
+	DropSingleKey        bool
+	LabelMap             map[string]interface{}
+	LabelSelector        map[string]string
+	DynamicHostPath      map[string]interface{}
+	DynamicHostPrefix    string
+	DynamicHostSulfix    string
+	DynamicHostRegex     string
 }
 
 func ParseConfig(cfg ConfigGetter) (*Config, error) {
-	res := &config{}
+	res := &Config{}
 
-	res.clientConfig = defaultClientCfg
+	res.ClientConfig = defaultClientCfg
 
 	url := cfg.Get("URL")
 	var clientURL flagext.URLValue
@@ -66,10 +66,10 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 	if err != nil {
 		return nil, errors.New("failed to parse client URL")
 	}
-	res.clientConfig.URL = clientURL
+	res.ClientConfig.URL = clientURL
 
 	// cfg.Get will return empty string if not set, which is handled by the client library as no tenant
-	res.clientConfig.TenantID = cfg.Get("TenantID")
+	res.ClientConfig.TenantID = cfg.Get("TenantID")
 
 	batchWait := cfg.Get("BatchWait")
 	if batchWait != "" {
@@ -77,7 +77,7 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse BatchWait: %s", batchWait)
 		}
-		res.clientConfig.BatchWait = time.Duration(batchWaitValue) * time.Second
+		res.ClientConfig.BatchWait = time.Duration(batchWaitValue) * time.Second
 	}
 
 	batchSize := cfg.Get("BatchSize")
@@ -86,7 +86,7 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse BatchSize: %s", batchSize)
 		}
-		res.clientConfig.BatchSize = batchSizeValue
+		res.ClientConfig.BatchSize = batchSizeValue
 	}
 
 	labels := cfg.Get("Labels")
@@ -101,7 +101,7 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 	for _, m := range matchers {
 		labelSet[model.LabelName(m.Name)] = model.LabelValue(m.Value)
 	}
-	res.clientConfig.ExternalLabels = lokiflag.LabelSet{LabelSet: labelSet}
+	res.ClientConfig.ExternalLabels = lokiflag.LabelSet{LabelSet: labelSet}
 
 	logLevel := cfg.Get("LogLevel")
 	if logLevel == "" {
@@ -111,34 +111,34 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 	if err := level.Set(logLevel); err != nil {
 		return nil, fmt.Errorf("invalid log level: %v", logLevel)
 	}
-	res.logLevel = level
+	res.LogLevel = level
 
 	autoKubernetesLabels := cfg.Get("AutoKubernetesLabels")
 	switch autoKubernetesLabels {
 	case "false", "":
-		res.autoKubernetesLabels = false
+		res.AutoKubernetesLabels = false
 	case "true":
-		res.autoKubernetesLabels = true
+		res.AutoKubernetesLabels = true
 	default:
 		return nil, fmt.Errorf("invalid boolean AutoKubernetesLabels: %v", autoKubernetesLabels)
 	}
 
 	removeKey := cfg.Get("RemoveKeys")
 	if removeKey != "" {
-		res.removeKeys = strings.Split(removeKey, ",")
+		res.RemoveKeys = strings.Split(removeKey, ",")
 	}
 
 	labelKeys := cfg.Get("LabelKeys")
 	if labelKeys != "" {
-		res.labelKeys = strings.Split(labelKeys, ",")
+		res.LabelKeys = strings.Split(labelKeys, ",")
 	}
 
 	dropSingleKey := cfg.Get("DropSingleKey")
 	switch dropSingleKey {
 	case "false":
-		res.dropSingleKey = false
+		res.DropSingleKey = false
 	case "true", "":
-		res.dropSingleKey = true
+		res.DropSingleKey = true
 	default:
 		return nil, fmt.Errorf("invalid boolean DropSingleKey: %v", dropSingleKey)
 	}
@@ -146,9 +146,9 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 	lineFormat := cfg.Get("LineFormat")
 	switch lineFormat {
 	case "json", "":
-		res.lineFormat = jsonFormat
+		res.LineFormat = JsonFormat
 	case "key_value":
-		res.lineFormat = kvPairFormat
+		res.LineFormat = KvPairFormat
 	default:
 		return nil, fmt.Errorf("invalid format: %s", lineFormat)
 	}
@@ -159,35 +159,38 @@ func ParseConfig(cfg ConfigGetter) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open LabelMap file: %s", err)
 		}
-		if err := json.Unmarshal(content, &res.labelMap); err != nil {
+		if err := json.Unmarshal(content, &res.LabelMap); err != nil {
 			return nil, fmt.Errorf("failed to Unmarshal LabelMap file: %s", err)
 		}
-		res.labelKeys = nil
+		res.LabelKeys = nil
 	}
 
 	labelSelector := cfg.Get("LabelSelector")
 	if labelSelector != "" {
-		labels := strings.Split(labelKeys, ",")
-		res.labelSelector = make(map[string]string)
+		labels := strings.Split(labelSelector, ",")
+		res.LabelSelector = make(map[string]string)
 		for _, label := range labels {
-			splitLabel := strings.Split(label, ",")
+			splitLabel := strings.Split(label, ":")
 			if len(splitLabel) != 2 {
 				continue
 			}
-			res.labelSelector[splitLabel[0]] = splitLabel[1]
+			res.LabelSelector[splitLabel[0]] = splitLabel[1]
 		}
 	}
 
 	dynamicHostPath := cfg.Get("DynamicHostPath")
 	if dynamicHostPath != "" {
-		if err := json.Unmarshal([]byte(dynamicHostPath), &res.dynamicHostPath); err != nil {
+		if err := json.Unmarshal([]byte(dynamicHostPath), &res.DynamicHostPath); err != nil {
 			return nil, fmt.Errorf("failed to Unmarshal DynamicHostPath json: %s", err)
 		}
 	}
 
-	res.dynamicHostPrefix = cfg.Get("DynamicHostPrefix")
-	res.dynamicHostSulfix = cfg.Get("DynamicHostSulfix")
-	res.dynamicHostRegex = cfg.Get("DynamicHostRegex")
+	res.DynamicHostPrefix = cfg.Get("DynamicHostPrefix")
+	res.DynamicHostSulfix = cfg.Get("DynamicHostSulfix")
+	res.DynamicHostRegex = cfg.Get("DynamicHostRegex")
+	if res.DynamicHostRegex == "" {
+		res.DynamicHostRegex = "*"
+	}
 
 	return res, nil
 }

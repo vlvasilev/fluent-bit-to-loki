@@ -8,9 +8,10 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/common/model"
-	"go.etcd.io/etcd/client"
+	"k8s.io/client-go/tools/cache"
 
-	controller "github.com/fluent-bit-to-loki/pkg/controller/controller"
+	"github.com/gardener/logging/fluent-bit-to-loki/pkg/config"
+	controller "github.com/gardener/logging/fluent-bit-to-loki/pkg/controller"
 	lokiclient "github.com/grafana/loki/pkg/promtail/client"
 )
 
@@ -20,31 +21,36 @@ type Loki interface {
 }
 
 type loki struct {
-	cfg               *config
+	cfg               *config.Config
 	defaultClient     lokiclient.Client
-	dynamicHostRegexp regexp.Regexp
-	controller        *Controller
+	dynamicHostRegexp *regexp.Regexp
+	controller        controller.Controller
 	logger            log.Logger
 }
 
-func NewPlugin(cfg *config, logger log.Logger) (*loki, error) {
-	defaultLokiClient, err := lokiclient.New(cfg.clientConfig, logger)
+func NewPlugin(informer cache.SharedIndexInformer, cfg *config.Config, logger log.Logger) (*loki, error) {
+	var dynamicHostRegexp *regexp.Regexp
+	var ctl controller.Controller
+
+	defaultLokiClient, err := lokiclient.New(cfg.ClientConfig, logger)
 	if err != nil {
 		return nil, err
 	}
-	kubernetesCleint, err := getInclusterKubernetsClient()
-	if err != nil {
-		return nil, err
+
+	if cfg.DynamicHostPath != nil {
+		dynamicHostRegexp = regexp.MustCompile(cfg.DynamicHostRegex)
+		ctl, err = controller.NewController(informer, cfg.ClientConfig, logger, cfg.DynamicHostPrefix, cfg.DynamicHostSulfix, cfg.LabelSelector)
+		if err != nil {
+			return nil, err
+		}
 	}
-	ctl, err := controller.NewController(kubernetesCleint, cfg.clientConfig, logger, cfg.dynamicHostRegex, cfg.dynamicHostPrefix, cfg.dynamicHostSulfix)
-	if err != nil {
-		return nil, err
-	}
+
 	return &loki{
-		cfg:        cfg,
-		client:     client,
-		controller: ctl,
-		logger:     logger,
+		cfg:               cfg,
+		defaultClient:     defaultLokiClient,
+		dynamicHostRegexp: dynamicHostRegexp,
+		controller:        ctl,
+		logger:            logger,
 	}, nil
 }
 
@@ -53,50 +59,66 @@ func (l *loki) SendRecord(r map[interface{}]interface{}, ts time.Time) error {
 	records := toStringMap(r)
 	level.Debug(l.logger).Log("msg", "processing records", "records", fmt.Sprintf("%+v", records))
 	lbs := model.LabelSet{}
-	if l.cfg.autoKubernetesLabels {
+	if l.cfg.AutoKubernetesLabels {
 		err := autoLabels(records, lbs)
 		if err != nil {
 			level.Error(l.logger).Log("msg", err.Error(), "records", fmt.Sprintf("%+v", records))
 		}
 	}
-	if l.cfg.labelMap != nil {
-		mapLabels(records, l.cfg.labelMap, lbs)
+
+	if l.cfg.LabelMap != nil {
+		mapLabels(records, l.cfg.LabelMap, lbs)
 	} else {
-		lbs = extractLabels(records, l.cfg.labelKeys)
+		lbs = extractLabels(records, l.cfg.LabelKeys)
 	}
 
-	dynamicHostName := getDynamicHostName(records, l.cfg.dynamicHostPath)
-	removeKeys(records, append(l.cfg.labelKeys, l.cfg.removeKeys...))
+	dynamicHostName := getDynamicHostName(records, l.cfg.DynamicHostPath)
+
+	removeKeys(records, append(l.cfg.LabelKeys, l.cfg.RemoveKeys...))
 	if len(records) == 0 {
 		return nil
 	}
-	if l.cfg.dropSingleKey && len(records) == 1 {
-		for _, v := range records {
-			return l.client.Handle(lbs, ts, fmt.Sprintf("%v", v))
-		}
-	}
-	line, err := createLine(records, l.cfg.lineFormat)
-	if err != nil {
-		return fmt.Errorf("error creating line: %v", err)
-	}
 
 	client := l.getClient(dynamicHostName)
+
 	if client == nil {
 		return fmt.Errorf("could not found client for %s", dynamicHostName)
 	}
 
-	return client.Handle(lbs, ts, line)
+	if l.cfg.DropSingleKey && len(records) == 1 {
+		for _, v := range records {
+			return client.Handle(lbs, ts, fmt.Sprintf("%v", v))
+		}
+	}
+
+	line, err := createLine(records, l.cfg.LineFormat)
+	if err != nil {
+		return fmt.Errorf("error creating line: %v", err)
+	}
+
+	err = client.Handle(lbs, ts, line)
+	if err != nil {
+		level.Error(l.logger).Log("msg", "error sending record to Loki", "error", err)
+	}
+
+	return err
 }
 
 func (l *loki) Close() {
-	loki.defaultClient.Stop()
-	loki.controller.Stop()
+	l.defaultClient.Stop()
+	l.controller.Stop()
 }
 
-func (l *loki) getClient(dynamicHosName string) client.Client {
-	if dynamicHosName != "" && l.controller.isDynamicHost(dynamicHosName) {
-		return l.controller.getClient(dynamicHosName)
+func (l *loki) getClient(dynamicHosName string) lokiclient.Client {
+	if l.isDynamicHost(dynamicHosName) && l.controller != nil {
+		return l.controller.GetClient(dynamicHosName)
 	}
 
-	return l.client
+	return l.defaultClient
+}
+
+func (l *loki) isDynamicHost(dynamicHostName string) bool {
+	return dynamicHostName != "" &&
+		l.dynamicHostRegexp != nil &&
+		l.dynamicHostRegexp.Match([]byte(dynamicHostName))
 }

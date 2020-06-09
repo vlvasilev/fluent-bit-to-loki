@@ -2,9 +2,7 @@ package controller
 
 import (
 	"fmt"
-	"regexp"
 	"sync"
-	"time"
 
 	"k8s.io/apimachinery/pkg/labels"
 
@@ -12,15 +10,13 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	corev1 "k8s.io/api/core/v1"
-	kubeinformers "k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
 	lokiclient "github.com/grafana/loki/pkg/promtail/client"
 )
 
 type Controller interface {
-	GetCleint(name string) lokiclient.Client
+	GetClient(name string) lokiclient.Client
 	Stop()
 }
 
@@ -35,49 +31,33 @@ type controller struct {
 	logger            log.Logger
 }
 
-func NewController(client kubernetes.Interface, clientConfig lokiclient.Config, logger log.Logger, dynamicHostPrefix, dynamicHostSulfix string, l map[string]string) (Controller, error) {
-	// if dynamicHostRegex == "" {
-	// 	return &Controller{}, nil
-	// }
-	// config, err := rest.InClusterConfig()
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// fake.NewSimpleClientset().
-	// kubeClient, err := kubernetes.NewForConfig(config)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("Error building kubernetes clientset: %s", err.Error())
-	// }
+func NewController(informer cache.SharedIndexInformer, clientConfig lokiclient.Config, logger log.Logger, dynamicHostPrefix, dynamicHostSulfix string, l map[string]string) (Controller, error) {
 	labelSelector := labels.SelectorFromSet(l)
 
-	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(client, time.Second*30)
-
-	controller := &Controller{
+	controller := &controller{
 		clients:           make(map[string]lokiclient.Client),
 		stopChn:           make(chan struct{}),
 		clientConfig:      clientConfig,
 		labelSelector:     labelSelector,
 		dynamicHostPrefix: dynamicHostPrefix,
 		dynamicHostSulfix: dynamicHostSulfix,
-		dynamicHostRegex:  regexp.MustCompile(dynamicHostRegex),
 		logger:            logger,
 	}
 
-	kubeInformerFactory.Core().V1().Namespaces().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    controller.addFunc,
 		DeleteFunc: controller.delFunc,
 		UpdateFunc: controller.updateFunc,
 	})
 
-	kubeInformerFactory.Start(controller.stopChn)
-	if !cache.WaitForCacheSync(controller.stopChn, kubeInformerFactory.Core().V1().Namespaces().Informer().HasSynced) {
+	if !cache.WaitForCacheSync(controller.stopChn, informer.HasSynced) {
 		return nil, fmt.Errorf("failed to wait for caches to sync")
 	}
 
 	return controller, nil
 }
 
-func (ctl *Controller) GetClient(name string) lokiclient.Client {
+func (ctl *controller) GetClient(name string) lokiclient.Client {
 	ctl.lock.Lock()
 	defer ctl.lock.Unlock()
 
@@ -87,7 +67,7 @@ func (ctl *Controller) GetClient(name string) lokiclient.Client {
 	return nil
 }
 
-func (ctl *Controller) Stop() {
+func (ctl *controller) Stop() {
 	ctl.lock.Lock()
 	defer ctl.lock.Unlock()
 	close(ctl.stopChn)
@@ -96,63 +76,56 @@ func (ctl *Controller) Stop() {
 	}
 }
 
-func (ctl *Controller) addFunc(obj interface{}) {
-	ctl.lock.Lock()
-	defer ctl.lock.Unlock()
-
-	selector := labels.SelectorFromSet(labels.Set{"gardener.cloud/role": "shoot"})
+func (ctl *controller) addFunc(obj interface{}) {
 	namespace, ok := obj.(*corev1.Namespace)
 	if !ok {
 		level.Error(ctl.logger).Log(fmt.Sprintf("%v", obj), "is not a namespace")
 		return
 	}
 
-	if selector.Matches(namespace.Labels) {
-		clientConf := ctl.getClientConfig(namespace)
-		if clientConf == nil {
-			return
-		}
-
-		client, err := lokiclient.New(*clientConf, logger)
-		if err != nil {
-			level.Error(ctl.logger).Log("failed to make new loki client for namespace", namespace, "error", err.Error())
-			return
-		}
-
-		level.Info(ctl.logger).Log("Add client for namespace ", namespace)
-		ctl.clients[namespace] = client
+	if ctl.matches(namespace) {
+		ctl.createClient(namespace)
 	}
 }
 
-func (ctl *Controller) delFunc(obj interface{}) {
-	ctl.lock.Lock()
-	defer ctl.lock.Unlock()
-
-	namespace := ctl.getNamespaceNameIfMatch(obj)
-	if namespace == "" {
+func (ctl *controller) updateFunc(oldObj interface{}, newObj interface{}) {
+	oldNamespace, ok := oldObj.(*corev1.Namespace)
+	if !ok {
+		level.Error(ctl.logger).Log(fmt.Sprintf("%v", oldObj), "is not a namespace")
 		return
 	}
 
-	client, ok := ctl.clients[namespace]
+	newNamespace, ok := newObj.(*corev1.Namespace)
+	if !ok {
+		level.Error(ctl.logger).Log(fmt.Sprintf("%v", newObj), "is not a namespace")
+		return
+	}
+
+	client, ok := ctl.clients[oldNamespace.Name]
 	if ok && client != nil {
-		client.Stop()
-		delete(ctl.clients, namespace)
+		if ctl.matches(newNamespace) {
+			ctl.createClient(newNamespace)
+		} else {
+			ctl.deleteClient(newNamespace)
+		}
+	} else {
+		if ctl.matches(newNamespace) {
+			ctl.createClient(newNamespace)
+		}
 	}
 }
 
-func (ctl *Controller) getNamespaceNameIfMatch(obj interface{}) string {
+func (ctl *controller) delFunc(obj interface{}) {
 	namespace, ok := obj.(*corev1.Namespace)
 	if !ok {
 		level.Error(ctl.logger).Log(fmt.Sprintf("%v", obj), "is not a namespace")
-		return ""
+		return
 	}
-	if !ctl.isDynamicHost(namespace.Name) {
-		return ""
-	}
-	return namespace.Name
+
+	ctl.deleteClient(namespace)
 }
 
-func (ctl *Controller) getClientConfig(namespaces string) *lokiclient.Config {
+func (ctl *controller) getClientConfig(namespaces string) *lokiclient.Config {
 	var clientURL flagext.URLValue
 
 	url := ctl.dynamicHostPrefix + namespaces + ctl.dynamicHostSulfix
@@ -168,6 +141,37 @@ func (ctl *Controller) getClientConfig(namespaces string) *lokiclient.Config {
 	return &clientConf
 }
 
-func (ctl *Controller) isDynamicHost(dynamicHostName string) bool {
-	return ctl.dynamicHostRegex.Match([]byte(dynamicHostName))
+func (ctl *controller) matches(namespace *corev1.Namespace) bool {
+	return ctl.labelSelector.Matches(labels.Set(namespace.Labels))
+}
+
+func (ctl *controller) createClient(namespace *corev1.Namespace) {
+	ctl.lock.Lock()
+	defer ctl.lock.Unlock()
+
+	clientConf := ctl.getClientConfig(namespace.Name)
+	if clientConf == nil {
+		return
+	}
+
+	client, err := lokiclient.New(*clientConf, ctl.logger)
+	if err != nil {
+		level.Error(ctl.logger).Log("failed to make new loki client for namespace", namespace, "error", err.Error())
+		return
+	}
+
+	level.Info(ctl.logger).Log("Add", "client", "namespace", namespace)
+	ctl.clients[namespace.Name] = client
+}
+
+func (ctl *controller) deleteClient(namespace *corev1.Namespace) {
+	ctl.lock.Lock()
+	defer ctl.lock.Unlock()
+
+	client, ok := ctl.clients[namespace.Name]
+	if ok && client != nil {
+		client.Stop()
+		level.Info(ctl.logger).Log("Delete", "client", "namespace", namespace)
+		delete(ctl.clients, namespace.Name)
+	}
 }

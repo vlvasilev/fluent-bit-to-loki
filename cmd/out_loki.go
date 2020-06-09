@@ -3,6 +3,7 @@ package main
 import (
 	"C"
 	"fmt"
+	"os"
 	"time"
 	"unsafe"
 
@@ -12,20 +13,35 @@ import (
 	"github.com/prometheus/common/version"
 	"github.com/weaveworks/common/logging"
 
-	"github.com/fluent-bit-to-loki/pkg/config/config"
-	"github.com/fluent-bit-to-loki/pkg/lokiplugin/lokiplugin"
+	"github.com/gardener/logging/fluent-bit-to-loki/pkg/config"
+	"github.com/gardener/logging/fluent-bit-to-loki/pkg/lokiplugin"
+
+	kubeinformers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 )
 
 var (
 	// registered loki plugin instances, required for disposal during shutdown
-	plugins []*loki
-	logger  log.Logger
+	plugins          []lokiplugin.Loki
+	logger           log.Logger
+	informer         cache.SharedIndexInformer
+	informerStopChan chan struct{}
 )
 
 func init() {
 	var logLevel logging.Level
 	_ = logLevel.Set("info")
 	logger = newLogger(logLevel)
+
+	kubernetesCleint, err := getInclusterKubernetsClient()
+	if err != nil {
+		panic(err)
+	}
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubernetesCleint, time.Second*30)
+	informer = kubeInformerFactory.Core().V1().Namespaces().Informer()
+	kubeInformerFactory.Start(informerStopChan)
 }
 
 type pluginConfig struct {
@@ -53,28 +69,28 @@ func FLBPluginInit(ctx unsafe.Pointer) int {
 
 	// numeric plugin ID, only used for user-facing purpose (logging, ...)
 	id := len(plugins)
-	logger := log.With(newLogger(conf.logLevel), "id", id)
+	logger := log.With(newLogger(conf.LogLevel), "id", id)
 
 	level.Info(logger).Log("[flb-go]", "Starting fluent-bit-go-loki", "version", version.Info())
 	paramLogger := log.With(logger, "[flb-go]", "provided parameter")
-	level.Info(paramLogger).Log("URL", conf.clientConfig.URL)
-	level.Info(paramLogger).Log("TenantID", conf.clientConfig.TenantID)
-	level.Info(paramLogger).Log("BatchWait", conf.clientConfig.BatchWait)
-	level.Info(paramLogger).Log("BatchSize", conf.clientConfig.BatchSize)
-	level.Info(paramLogger).Log("Labels", conf.clientConfig.ExternalLabels)
-	level.Info(paramLogger).Log("LogLevel", conf.logLevel.String())
-	level.Info(paramLogger).Log("AutoKubernetesLabels", conf.autoKubernetesLabels)
-	level.Info(paramLogger).Log("RemoveKeys", fmt.Sprintf("%+v", conf.removeKeys))
-	level.Info(paramLogger).Log("LabelKeys", fmt.Sprintf("%+v", conf.labelKeys))
-	level.Info(paramLogger).Log("LineFormat", conf.lineFormat)
-	level.Info(paramLogger).Log("DropSingleKey", conf.dropSingleKey)
-	level.Info(paramLogger).Log("LabelMapPath", fmt.Sprintf("%+v", conf.labelMap))
-	level.Info(paramLogger).Log("DynamicHostPath", fmt.Sprintf("%+v", conf.dynamicHostPath))
-	level.Info(paramLogger).Log("DynamicHostPrefix", fmt.Sprintf("%+v", conf.dynamicHostPrefix))
-	level.Info(paramLogger).Log("DynamicHostSulfix", fmt.Sprintf("%+v", conf.dynamicHostSulfix))
-	level.Info(paramLogger).Log("DynamicHostRegex", fmt.Sprintf("%+v", conf.dynamicHostRegex))
+	level.Info(paramLogger).Log("URL", conf.ClientConfig.URL)
+	level.Info(paramLogger).Log("TenantID", conf.ClientConfig.TenantID)
+	level.Info(paramLogger).Log("BatchWait", conf.ClientConfig.BatchWait)
+	level.Info(paramLogger).Log("BatchSize", conf.ClientConfig.BatchSize)
+	level.Info(paramLogger).Log("Labels", conf.ClientConfig.ExternalLabels)
+	level.Info(paramLogger).Log("LogLevel", conf.LogLevel.String())
+	level.Info(paramLogger).Log("AutoKubernetesLabels", conf.AutoKubernetesLabels)
+	level.Info(paramLogger).Log("RemoveKeys", fmt.Sprintf("%+v", conf.RemoveKeys))
+	level.Info(paramLogger).Log("LabelKeys", fmt.Sprintf("%+v", conf.LabelKeys))
+	level.Info(paramLogger).Log("LineFormat", conf.LineFormat)
+	level.Info(paramLogger).Log("DropSingleKey", conf.DropSingleKey)
+	level.Info(paramLogger).Log("LabelMapPath", fmt.Sprintf("%+v", conf.LabelMap))
+	level.Info(paramLogger).Log("DynamicHostPath", fmt.Sprintf("%+v", conf.DynamicHostPath))
+	level.Info(paramLogger).Log("DynamicHostPrefix", fmt.Sprintf("%+v", conf.DynamicHostPrefix))
+	level.Info(paramLogger).Log("DynamicHostSulfix", fmt.Sprintf("%+v", conf.DynamicHostSulfix))
+	level.Info(paramLogger).Log("DynamicHostRegex", fmt.Sprintf("%+v", conf.DynamicHostRegex))
 
-	plugin, err := lokiplugin.NewPlugin(conf, logger)
+	plugin, err := lokiplugin.NewPlugin(informer, conf, logger)
 	if err != nil {
 		level.Error(logger).Log("newPlugin", err)
 		return output.FLB_ERROR
@@ -90,7 +106,7 @@ func FLBPluginInit(ctx unsafe.Pointer) int {
 
 //export FLBPluginFlushCtx
 func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, _ *C.char) int {
-	plugin := output.FLBPluginGetContext(ctx).(*loki)
+	plugin := output.FLBPluginGetContext(ctx).(lokiplugin.Loki)
 	if plugin == nil {
 		level.Error(logger).Log("[flb-go]", "plugin not initialized")
 		return output.FLB_ERROR
@@ -116,13 +132,12 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, _ *C.char) int {
 		case uint64:
 			timestamp = time.Unix(int64(t), 0)
 		default:
-			level.Warn(plugin.logger).Log("msg", "timestamp isn't known format. Use current time.")
+			level.Warn(logger).Log("msg", "timestamp isn't known format. Use current time.")
 			timestamp = time.Now()
 		}
 
-		err := plugin.sendRecord(record, timestamp)
+		err := plugin.SendRecord(record, timestamp)
 		if err != nil {
-			level.Error(plugin.logger).Log("msg", "error sending record to Loki", "error", err)
 			return output.FLB_ERROR
 		}
 	}
@@ -138,12 +153,28 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, _ *C.char) int {
 //export FLBPluginExit
 func FLBPluginExit() int {
 	for _, plugin := range plugins {
-		if plugin.client != nil {
-			plugin.client.Stop()
-		}
-		plugin.controller.Stop()
+		plugin.Close()
 	}
+	close(informerStopChan)
 	return output.FLB_OK
 }
 
-func main() {}
+func newLogger(logLevel logging.Level) log.Logger {
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	logger = level.NewFilter(logger, logLevel.Gokit)
+	logger = log.With(logger, "caller", log.Caller(3))
+	return logger
+}
+
+func getInclusterKubernetsClient() (kubernetes.Interface, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	//fake.NewSimpleClientset().
+	return kubernetes.NewForConfig(config)
+}
+
+func main() {
+	fmt.Println("EBANIIIIIIIEEEEEEEEEEEEE")
+}

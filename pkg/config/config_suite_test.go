@@ -24,22 +24,6 @@ import (
 
 var testFileName string
 
-// var _ = BeforeSuite(func() {
-// 	var err error
-// 	testFileName, err = CreateTempLabelMap()
-// 	Expect(err).ToNot(HaveOccurred())
-
-// 	m := make(map[string]interface{})
-// 	content, err := ioutil.ReadFile(testFileName)
-// 	if err != nil {
-// 		fmt.Printf("failed to open testFileName file: %s", err)
-// 	}
-// 	if err := json.Unmarshal(content, &m); err != nil {
-// 		fmt.Printf("failed to Unmarshal testFileName file: %s", err)
-// 	}
-// 	fmt.Printf("########################################TEST FILE: %+v\n", m)
-// })
-
 var _ = AfterSuite(func() {
 	os.Remove(testFileName)
 })

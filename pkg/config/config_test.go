@@ -9,7 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 
-	. "github.com/vlvasilev/fluent-bit-to-loki/cmd/config"
+	. "github.com/gardener/logging/fluent-bit-to-loki/pkg/config"
 
 	"github.com/weaveworks/common/logging"
 
@@ -30,7 +30,7 @@ func (f fakeConfig) Get(key string) string {
 var _ = Describe("Config", func() {
 	type testArgs struct {
 		conf    map[string]string
-		want    *config
+		want    *Config
 		wantErr bool
 	}
 
@@ -40,6 +40,7 @@ var _ = Describe("Config", func() {
 	warnLogLevel.Set("warn")
 	infoLogLevel.Set("info")
 	somewhereURL, _ := ParseURL("http://somewhere.com:3100/loki/api/v1/push")
+	defaultURL, _ := ParseURL("http://localhost:3100/loki/api/v1/push")
 
 	DescribeTable("Test Config",
 		func(args testArgs) {
@@ -48,20 +49,36 @@ var _ = Describe("Config", func() {
 				Expect(err).To(HaveOccurred())
 			} else {
 				Expect(err).ToNot(HaveOccurred())
-				Expect(args.want.clientConfig.BatchSize).To(Equal(got.clientConfig.BatchSize))
-				Expect(args.want.clientConfig.ExternalLabels).To(Equal(got.clientConfig.ExternalLabels))
-				Expect(args.want.clientConfig.BatchWait).To(Equal(got.clientConfig.BatchWait))
-				Expect(args.want.clientConfig.URL).To(Equal(got.clientConfig.URL))
-				Expect(args.want.clientConfig.TenantID).To(Equal(got.clientConfig.TenantID))
-				Expect(args.want.lineFormat).To(Equal(got.lineFormat))
-				Expect(args.want.removeKeys).To(Equal(got.removeKeys))
-				Expect(args.want.logLevel.String()).To(Equal(got.logLevel.String()))
-				Expect(args.want.labelMap).To(Equal(got.labelMap))
-				Expect(args.want.dynamicHostPrefix).To(Equal(got.dynamicHostPrefix))
-				Expect(args.want.dynamicHostSulfix).To(Equal(got.dynamicHostSulfix))
-				Expect(args.want.dynamicHostRegex).To(Equal(got.dynamicHostRegex))
+				Expect(args.want.ClientConfig.BatchSize).To(Equal(got.ClientConfig.BatchSize))
+				Expect(args.want.ClientConfig.ExternalLabels).To(Equal(got.ClientConfig.ExternalLabels))
+				Expect(args.want.ClientConfig.BatchWait).To(Equal(got.ClientConfig.BatchWait))
+				Expect(args.want.ClientConfig.URL).To(Equal(got.ClientConfig.URL))
+				Expect(args.want.ClientConfig.TenantID).To(Equal(got.ClientConfig.TenantID))
+				Expect(args.want.LineFormat).To(Equal(got.LineFormat))
+				Expect(args.want.RemoveKeys).To(Equal(got.RemoveKeys))
+				Expect(args.want.LogLevel.String()).To(Equal(got.LogLevel.String()))
+				Expect(args.want.LabelMap).To(Equal(got.LabelMap))
+				Expect(args.want.DynamicHostPrefix).To(Equal(got.DynamicHostPrefix))
+				Expect(args.want.DynamicHostSulfix).To(Equal(got.DynamicHostSulfix))
+				Expect(args.want.DynamicHostRegex).To(Equal(got.DynamicHostRegex))
 			}
 		},
+		Entry("default values", testArgs{
+			map[string]string{},
+			&Config{
+				LineFormat: JsonFormat,
+				ClientConfig: client.Config{
+					URL:            defaultURL,
+					BatchSize:      100 * 1024,
+					BatchWait:      1 * time.Second,
+					ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"job": "fluent-bit"}},
+				},
+				LogLevel:         infoLogLevel,
+				DropSingleKey:    true,
+				DynamicHostRegex: "*",
+			},
+			false},
+		),
 		Entry("setting values", testArgs{
 			map[string]string{
 				"URL":           "http://somewhere.com:3100/loki/api/v1/push",
@@ -75,19 +92,20 @@ var _ = Describe("Config", func() {
 				"LabelKeys":     "foo,bar",
 				"DropSingleKey": "false",
 			},
-			&config{
-				lineFormat: kvPairFormat,
-				clientConfig: client.Config{
+			&Config{
+				LineFormat: KvPairFormat,
+				ClientConfig: client.Config{
 					URL:            somewhereURL,
 					TenantID:       "my-tenant-id",
 					BatchSize:      100,
 					BatchWait:      30 * time.Second,
 					ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"app": "foo"}},
 				},
-				logLevel:      warnLogLevel,
-				labelKeys:     []string{"foo", "bar"},
-				removeKeys:    []string{"buzz", "fuzz"},
-				dropSingleKey: false,
+				LogLevel:         warnLogLevel,
+				LabelKeys:        []string{"foo", "bar"},
+				RemoveKeys:       []string{"buzz", "fuzz"},
+				DropSingleKey:    false,
+				DynamicHostRegex: "*",
 			},
 			false},
 		),
@@ -104,20 +122,20 @@ var _ = Describe("Config", func() {
 				"DropSingleKey": "false",
 				"LabelMapPath":  getTestFileName(),
 			},
-			&config{
-				lineFormat: kvPairFormat,
-				clientConfig: client.Config{
+			&Config{
+				LineFormat: KvPairFormat,
+				ClientConfig: client.Config{
 					URL:            somewhereURL,
 					TenantID:       "", // empty as not set in fluent-bit plugin config map
 					BatchSize:      100,
 					BatchWait:      30 * time.Second,
 					ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"app": "foo"}},
 				},
-				logLevel:      warnLogLevel,
-				labelKeys:     nil,
-				removeKeys:    []string{"buzz", "fuzz"},
-				dropSingleKey: false,
-				labelMap: map[string]interface{}{
+				LogLevel:      warnLogLevel,
+				LabelKeys:     nil,
+				RemoveKeys:    []string{"buzz", "fuzz"},
+				DropSingleKey: false,
+				LabelMap: map[string]interface{}{
 					"kubernetes": map[string]interface{}{
 						"container_name": "container",
 						"host":           "host",
@@ -130,6 +148,7 @@ var _ = Describe("Config", func() {
 					},
 					"stream": "stream",
 				},
+				DynamicHostRegex: "*",
 			},
 			false},
 		),
@@ -149,27 +168,27 @@ var _ = Describe("Config", func() {
 				"DynamicHostSulfix": ".svc:3100/loki/api/v1/push",
 				"DynamicHostRegex":  "shoot--",
 			},
-			&config{
-				lineFormat: kvPairFormat,
-				clientConfig: client.Config{
+			&Config{
+				LineFormat: KvPairFormat,
+				ClientConfig: client.Config{
 					URL:            somewhereURL,
 					TenantID:       "", // empty as not set in fluent-bit plugin config map
 					BatchSize:      100,
 					BatchWait:      30 * time.Second,
 					ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"app": "foo"}},
 				},
-				logLevel:      warnLogLevel,
-				labelKeys:     nil,
-				removeKeys:    []string{"buzz", "fuzz"},
-				dropSingleKey: false,
-				dynamicHostPath: map[string]interface{}{
+				LogLevel:      warnLogLevel,
+				LabelKeys:     nil,
+				RemoveKeys:    []string{"buzz", "fuzz"},
+				DropSingleKey: false,
+				DynamicHostPath: map[string]interface{}{
 					"kubernetes": map[string]interface{}{
 						"namespace_name": "namespace",
 					},
 				},
-				dynamicHostPrefix: "http://loki.",
-				dynamicHostSulfix: ".svc:3100/loki/api/v1/push",
-				dynamicHostRegex:  "shoot--",
+				DynamicHostPrefix: "http://loki.",
+				DynamicHostSulfix: ".svc:3100/loki/api/v1/push",
+				DynamicHostRegex:  "shoot--",
 			},
 			false},
 		),
@@ -183,27 +202,6 @@ var _ = Describe("Config", func() {
 		Entry("bad labelmap file", testArgs{map[string]string{"LabelMapPath": "a"}, nil, true}),
 		Entry("bad Dynamic Host Path", testArgs{map[string]string{"DynamicHostPath": "a"}, nil, true}),
 	)
-
-	Describe("defaults", func() {
-		It("must parse empty config map and set the default values", func() {
-			conf := map[string]string{}
-			want := getDefaultConfig(defaultClientCfg.BatchSize, defaultClientCfg.BatchWait)
-			got, err := parseConfig(fakeConfig(conf))
-			Expect(err).ToNot(HaveOccurred())
-			Expect(want.clientConfig.BatchSize).To(Equal(got.clientConfig.BatchSize))
-			Expect(want.clientConfig.ExternalLabels).To(Equal(got.clientConfig.ExternalLabels))
-			Expect(want.clientConfig.BatchWait).To(Equal(got.clientConfig.BatchWait))
-			Expect(want.clientConfig.URL).To(Equal(got.clientConfig.URL))
-			Expect(want.clientConfig.TenantID).To(Equal(got.clientConfig.TenantID))
-			Expect(want.lineFormat).To(Equal(got.lineFormat))
-			Expect(want.removeKeys).To(Equal(got.removeKeys))
-			Expect(want.logLevel.String()).To(Equal(got.logLevel.String()))
-			Expect(want.labelMap).To(Equal(got.labelMap))
-			Expect(want.dynamicHostPrefix).To(Equal(got.dynamicHostPrefix))
-			Expect(want.dynamicHostSulfix).To(Equal(got.dynamicHostSulfix))
-			Expect(want.dynamicHostRegex).To(Equal(got.dynamicHostRegex))
-		})
-	})
 })
 
 func ParseURL(u string) (flagext.URLValue, error) {
@@ -238,24 +236,6 @@ func CreateTempLabelMap() (string, error) {
 		return "", err
 	}
 	return file.Name(), nil
-}
-
-func getDefaultConfig(batchSize int, batchWait time.Duration) *config {
-	defaultURL, _ := ParseURL("http://localhost:3100/loki/api/v1/push")
-	infoLogLevel := logging.Level{}
-	infoLogLevel.Set("info")
-
-	return &config{
-		lineFormat: jsonFormat,
-		clientConfig: client.Config{
-			URL:            defaultURL,
-			BatchSize:      batchSize,
-			BatchWait:      batchWait,
-			ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"job": "fluent-bit"}},
-		},
-		logLevel:      infoLogLevel,
-		dropSingleKey: true,
-	}
 }
 
 func getTestFileName() string {
